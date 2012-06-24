@@ -1,0 +1,275 @@
+#!/bin/bash
+
+##################################################
+#                                                #
+#                      lvhm                      #
+#       Apache 2 project management script       #
+#                                                #
+#     This BASH script is designed to manage     #
+#    development projects that are hosted with   #
+#  Apache on a localhost.  It can create/remove  #
+#    enable/disable a web project in a single    #
+#      command, allowing you to quickly and      #
+#        conveniently set up new projects.       #
+#                                                #
+#         Modify to your heart's desire.         #
+#                     Enjoy.                     #
+#                                                #
+#         Copyright 2012 Jonah Dahlquist         #
+#                   BSD license                  #
+#                                                #
+##################################################
+
+# Configuration variables
+apache_sites_dir="/etc/apache2/sites-available"
+project_dir="/media/FILES/htdocs"
+project_archive_dir="/media/FILES/htdocs/archive"
+host_prefix="localhost."
+host_suffix=""
+public_html_dir="www"
+virtualhost_port="80"
+
+# Constants
+help="Available commands are:
+
+    create:    Creates a new site project, Apache virtual host, and hosts file entry
+    remove:    Removes the project's Apache virtual host and hosts file entry
+    enable:    Enables a site by activating it's Apache virtual host, and moving the project files out of the archive
+    disable:   Disables a site by deactivating it's Apache virtual host, and moving the project files into the archive
+    help:      Displays this help message"
+project_name_match="^[a-zA-Z0-9\.\-\_]+$"
+error_invalid_name="Error: you must specify a valid project name"
+
+# Create a file for the project virtual host, and write a virtual host entry to it
+create_virtualhost() {
+	echo "\
+<VirtualHost $host_prefix$project_name$host_suffix:$virtualhost_port>
+	DocumentRoot \"$project_dir/$project_name/$public_html_dir\"
+	ServerName $host_prefix$project_name$host_suffix
+	<Directory $project_dir/$project_name/$public_html_dir>
+		Options Indexes FollowSymLinks MultiViews
+		AllowOverride All
+		Order allow,deny
+		allow from all
+	</Directory>
+</VirtualHost>" \
+		> $apache_sites_dir/$host_prefix$project_name$host_suffix
+	return 0
+}
+
+# Scan the hosts file and strip this project entry from it
+remove_hosts_entry() {
+	host=$(echo "$host_prefix$project_name$host_suffix" | sed 's/[][()\.^$?*+]/\\&/g')
+	hosts_file_contents=`grep -Pxv "127\.0\.0\.1\s+$host" /etc/hosts`
+	echo "$hosts_file_contents" > /etc/hosts
+	return 0
+}
+
+# Prepend an entry to the hosts file for this project
+create_hosts_entry() {
+	remove_hosts_entry $project_name
+	hosts_file_contents=`cat /etc/hosts`
+	echo "127.0.0.1	$host_prefix$project_name$host_suffix
+$hosts_file_contents" \
+		> /etc/hosts
+}
+
+# Create a directory for the project files
+create_project_dir() {
+	mkdir $project_archive_dir/$project_name
+	return 0
+}
+
+# Create the project
+create_project() {
+	create_virtualhost $project_name
+	create_project_dir $project_name
+	echo "Successfully created project \"$project_name\""
+	return 0
+}
+
+# Check if the given project exists by name
+project_exists() {
+	if [ -s "$apache_sites_dir/$host_prefix$project_name$host_suffix" ]
+	then
+		if [ -e "$project_dir/$project_name" ] || [ -e "$project_archive_dir/$project_name" ]
+		then
+			echo 1
+		else
+			echo 0
+		fi
+	else
+		echo 0
+	fi
+}
+
+# Check if the given project is enabled
+project_enabled() {
+	if [ -e "$project_dir/$project_name" ]
+	then
+		echo 1
+	else
+		echo 0
+	fi
+}
+
+# Do a regex comparison of the name to make sure it is acceptable
+project_name_valid() {
+	if [[ $host_prefix$project_name$host_suffix =~ $project_name_match ]]
+	then
+		echo 1
+	else
+		echo 0
+	fi
+}
+
+# Enable a project by moving it out of the archive and activating the virtual host
+enable_project() {
+	create_hosts_entry $project_name
+	mv -i $project_archive_dir/$project_name $project_dir
+	a2ensite $host_prefix$project_name$host_suffix > /dev/null
+	service apache2 reload > /dev/null
+	echo "Successfully enabled project \"$project_name\""
+	return 0
+}
+
+# Disable a project by moving it into the archive and deactivating the virtual host
+disable_project() {
+	remove_hosts_entry $project_name
+	mv -i $project_dir/$project_name $project_archive_dir
+	a2dissite $host_prefix$project_name$host_suffix > /dev/null
+	service apache2 reload > /dev/null
+	echo "Successfully disabled project \"$project_name\""
+	return 0
+}
+
+# Remove a project by removing the hosts entry and deleting the virtual host
+remove_project() {
+	rm $apache_sites_dir/$host_prefix$project_name$host_suffix
+	echo "Successfully removed project \"$project_name\", but the project files are still intact in $project_archive_dir/$project_name/"
+	return 0
+}
+
+# Make sure the command is being run as root, it is required
+require_sudo() {
+	if [ $(whoami) != "root" ]
+	then
+		echo "Permission denied: must be run as root"
+		exit 1
+	fi
+}
+
+if [ $# -eq 0 ]
+then
+	echo "Unrecognised command"
+	echo "$help"
+fi
+
+while [ $# -gt 0 ]
+do
+	case "$1" in
+		-c|--create|create)
+			require_sudo
+			shift
+			project_name=$1
+			if [ $(project_name_valid $project_name) == "1" ]
+			then
+				if [ $(project_exists $project_name) == "0" ]
+				then
+					if [ ! -s "$apache_sites_dir/$host_prefix$project_name$host_suffix" ]
+					then
+						create_project $project_name
+					else
+						echo "Error: could not create project \"$project_name\", the virtual host file already exists.  Delete it and try again."
+						exit 1
+					fi
+				else
+					echo "Error: could not create project \"$project_name\", it already exists"
+					exit 1
+				fi
+			else
+				echo "$error_invalid_name"
+			fi
+			shift
+			;;
+		-e|--enable|enable)
+			require_sudo
+			shift
+			project_name=$1
+			if [ $(project_name_valid $project_name) == "1" ]
+			then
+				if [ $(project_exists $project_name) == "1" ]
+				then
+					if [ $(project_enabled $project_name) == "0" ]
+					then
+						enable_project $project_name
+					else
+						echo "Notice: project \"$project_name\" already enabled."
+					fi
+				else
+					echo "Error: could not enable project \"$project_name\", it does not exist."
+					exit 1
+				fi
+			else
+				echo "$error_invalid_name"
+			fi
+			shift
+			;;
+		-d|--disable|disable)
+			require_sudo
+			shift
+			project_name=$1
+			if [ $(project_name_valid $project_name) == "1" ]
+			then
+				if [ $(project_exists $project_name) == "1" ]
+				then
+					if [ $(project_enabled $project_name) == "1" ]
+					then
+						disable_project $project_name
+					else
+						echo "Notice: project \"$project_name\" already disabled."
+					fi
+				else
+					echo "Error: could not disable project \"$project_name\", it does not exist."
+					exit 1
+				fi
+			else
+				echo "$error_invalid_name"
+			fi
+			shift
+			;;
+		-r|--remove|remove)
+			require_sudo
+			shift
+			project_name=$1
+			if [ $(project_name_valid $project_name) == "1" ]
+			then
+				if [ $(project_exists $project_name) == "1" ]
+				then
+					if [ $(project_enabled $project_name) == "1" ]
+					then
+						disable_project $project_name
+					fi
+					remove_project $project_name
+				else
+					echo "Notice: could not remove project \"$project_name\", it does not exist."
+				fi
+			else
+				echo "$error_invalid_name"
+			fi
+			shift
+			;;
+		-h|--help|help)
+			echo "$help"
+			break
+			;;
+		*)
+			echo "Unrecognised command"
+			echo "$help"
+			break
+			;;
+	esac
+done
+
+echo ""
+exit 1
